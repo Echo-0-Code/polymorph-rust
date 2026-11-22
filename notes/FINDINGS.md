@@ -19,6 +19,26 @@ Checked 2026-11-22 against Horizon `2b77287de099c9316278ba7ac4d83590fdb7ef30` (N
   mixin there that scans all recipes and returns the chosen one fixes them all at once, with the right recipe id
   (so remainders and `item_crafted` follow the choice).
 
+## Blocker found by the compile check (2026-11-22)
+
+`crafting.rs`, `crafting/mod_kinds.rs` and `menu*.rs` sit under `crates/horizon-client/src/` but are compiled into
+the crate **horizon-client-lib** (`[lib] path = "../horizon-client/src/client_lib.rs"`), which `horizon_client`
+re-exports (`pub use horizon_client_lib::*`). That is a crate below the game crate: a mixin there needs
+`#[horizon_mod_api_macros::replaceable]` on the function, and `[[native.module]]` only takes files of
+`horizon_client` itself.
+
+- `Recipes::find_with_dimensions` has no marker, so the design below can't be built on `2b77287`.
+- In menu.rs only `Menu::recompute` is marked. A mixin there could show the chosen result, but the take re-checks
+  it with the unmarked `crafting_result_is_current` (first match only, whenever any mod registers a code crafting
+  kind: Sophisticated Backpacks does), and remainders and `item_crafted` follow the first match. Not shippable.
+- `Recipes` is not `Clone` and the server's table is often the shared `Resources.rest` one, so reordering the
+  recipe list from the game crate is not possible either.
+
+So Polymorph needs one change in Horizon: a hook in `find_with_dimensions` that lists every match and lets a mod
+pick (or the marker on it). With a hook, Polymorph can be a wasm mod with no mixins.
+
+The rest of this file describes the mixin design, kept for reference.
+
 ## Pitfalls
 
 - A mixin helper may not have generic (or lifetime) parameters, and `find_with_dimensions` returns

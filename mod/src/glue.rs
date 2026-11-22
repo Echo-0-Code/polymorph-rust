@@ -1,17 +1,20 @@
 //! The selector on the client: Polymorph's `PlayerRecipesWidget` over any screen with a crafting grid and a
 //! result slot (the inventory, a crafting table, a crafter, a mod's crafting menu such as AE2's terminal).
 //!
-//! It shows only in a world this game hosts (single player, or the host of a LAN world): the choice is kept in
-//! this process, where the integrated server makes the result. A client of another server has no say there.
+//! A pick is kept here for the client's prediction and sent to the server ([`engine::PICK`]), whose handler
+//! keeps it and has the player's crafting results made again on its next tick. On both sides the game asks
+//! `crafting_recipe_choice` whenever a grid matches more than one recipe.
 
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use mod_api::{
-    ClientHost, DrawContext, Flow, Hooks, ItemResource, ItemStack, MenuRef, MenuSlotKind, ScreenMouseButtonPressedPreEvent,
-    ScreenRenderPostEvent, ScreenView, Text, TooltipElement,
+    ClientHost, ClientTickPostEvent, CraftingRecipeChoiceEvent, DrawContext, Flow, Hooks, IPayloadContext, IPayloadHandler, ItemResource,
+    ItemStack, LoopContext, MenuRef, MenuSlotKind, PayloadBytes, PayloadHandleError, PayloadId, Registrar,
+    RegistrationContext, ScreenMouseButtonPressedPreEvent, ScreenRenderPostEvent, ScreenView, ServerHost,
+    ServerTickEvent, Text, TooltipElement,
 };
 
-use crate::engine;
+use crate::engine::{self, Pick};
 use crate::layout::{self, ITEM_INSET};
 
 const SELECTOR: &str = "polymorph:gui/sprites/selector_button";
@@ -26,6 +29,38 @@ static OPEN: Mutex<Option<MenuRef>> = Mutex::new(None);
 
 fn open() -> std::sync::MutexGuard<'static, Option<MenuRef>> {
     OPEN.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Client: the pick to send to the server.
+static OUTGOING: Mutex<Option<Pick>> = Mutex::new(None);
+
+fn outgoing() -> std::sync::MutexGuard<'static, Option<Pick>> {
+    OUTGOING.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Server: the players whose picks arrived since the last tick, whose crafting results are made again.
+static STALE: Mutex<Vec<u128>> = Mutex::new(Vec::new());
+
+fn stale() -> std::sync::MutexGuard<'static, Vec<u128>> {
+    STALE.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// `CPacketPlayerRecipeSelection.handle` on the server: the pick is kept, and the player's open grids are
+/// made again on the next tick (`ServerPlayer.containerMenu.slotsChanged`).
+struct PickHandler;
+
+impl IPayloadHandler for PickHandler {
+    fn handle(&self, payload: PayloadBytes, context: &mut dyn IPayloadContext) -> Result<(), PayloadHandleError> {
+        let Some(pick) = Pick::decode(&payload.0) else { return Ok(()) };
+        let Ok(player) = context.player() else { return Ok(()) };
+        if engine::with(|c| c.pick(&pick.set, &pick.id)) {
+            let mut s = stale();
+            if !s.contains(&player.uuid()) {
+                s.push(player.uuid());
+            }
+        }
+        Ok(())
+    }
 }
 
 /// The open screen's grid and result slot, with the conflict recorded for that grid.
@@ -45,12 +80,8 @@ impl Shown {
     }
 }
 
-fn hosted(host: &dyn ClientHost) -> bool {
-    host.client_session().client_server().is_some_and(|s| s.integrated_local)
-}
-
 fn shown(host: &dyn ClientHost, screen: &ScreenView<'_>) -> Option<Shown> {
-    if screen.id != "inventory" || !hosted(host) {
+    if screen.id != "inventory" {
         return None;
     }
     let menu = host.local_player()?.container_menu(host)?;
@@ -99,6 +130,33 @@ struct Polymorph;
 
 #[mod_api::horizon_mod]
 impl Hooks for Polymorph {
+    fn register(&self, r: &mut dyn Registrar, _cx: &RegistrationContext) {
+        r.payload_handlers().registrar("1").optional().play_to_server(PayloadId(engine::PICK.into()), Arc::new(PickHandler));
+    }
+
+    /// `RecipeManager.getRecipeFor` with Polymorph's choice, on whichever side matches the grid.
+    fn crafting_recipe_choice(&self, _context: &dyn LoopContext, event: &mut CraftingRecipeChoiceEvent<'_>) {
+        let width = event.width as usize;
+        event.choice = engine::choose(width, event.grid, event.recipes, event.results) as u32;
+    }
+
+    fn client_tick_post(&self, host: &mut dyn ClientHost, _event: &mut ClientTickPostEvent) {
+        let Some(pick) = outgoing().take() else { return };
+        // A server without Polymorph answers UnsupportedPeer: the result there stays the first match.
+        if let Err(e) = host.send_payload_to_server(&PayloadId(engine::PICK.into()), PayloadBytes(pick.encode())) {
+            eprintln!("[polymorph] pick not sent: {e:?}");
+        }
+    }
+
+    fn server_tick(&self, host: &mut dyn ServerHost, _event: &mut ServerTickEvent<'_>) {
+        let players = std::mem::take(&mut *stale());
+        for uuid in players {
+            if let Some(player) = host.player(uuid) {
+                player.crafting_changed(host);
+            }
+        }
+    }
+
     fn screen_render_post(&self, host: &dyn ClientHost, event: &mut ScreenRenderPostEvent<'_>) {
         let Some(s) = shown(host, event.screen) else {
             *open() = None;
@@ -162,7 +220,10 @@ impl Hooks for Polymorph {
         if matches!(event.button, 0 | 1) {
             if let Some(i) = s.outputs_at().iter().position(|r| layout::inside(*r, at)) {
                 let id = s.ids[i].clone();
+                let set = s.ids.clone();
                 engine::with(|c| c.select(s.size, &s.grid, &id, engine::same));
+                // Sent on the next client tick, the first hook here with a host that can send.
+                *outgoing() = Some(Pick { id, set });
             }
         }
         Flow::Cancel

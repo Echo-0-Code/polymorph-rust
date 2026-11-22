@@ -6,7 +6,7 @@
 //! change" in Polymorph's words, and also after they did). The last recipe picked by hand, and a recipe a
 //! viewer's "+" asked for, are tried next, then the first match, as in Polymorph.
 //!
-//! The game reaches this through [`crate::engine`]; everything here is plain data so it can be tested.
+//! The game reaches this through [`crate::engine`] (its `crafting_recipe_choice` hook); everything here is plain data so it can be tested.
 
 use std::collections::HashMap;
 
@@ -105,6 +105,25 @@ impl<S: Clone> Choices<S> {
         let Some(index) = c.ids.iter().position(|i| i == id) else { return false };
         c.chosen = index;
         let set = c.set();
+        self.by_set.insert(set, id.to_owned());
+        self.last = Some(id.to_owned());
+        self.pending = None;
+        self.changed = true;
+        true
+    }
+
+    /// A pick heard from elsewhere (the server hears the client's): `id` is made whenever the matching
+    /// recipes are `set`. False when `id` is not one of them.
+    pub fn pick(&mut self, set: &[String], id: &str) -> bool {
+        let set = set_of(set);
+        if !set.iter().any(|s| s == id) {
+            return false;
+        }
+        for c in self.recent.iter_mut().filter(|c| set_of(&c.ids) == set) {
+            if let Some(index) = c.ids.iter().position(|i| i == id) {
+                c.chosen = index;
+            }
+        }
         self.by_set.insert(set, id.to_owned());
         self.last = Some(id.to_owned());
         self.pending = None;

@@ -1,7 +1,7 @@
 id = "polymorph"
 name = "Polymorph"
 version = "0.1.0"
-description = "No more recipe conflicts: when the ingredients in a crafting grid match more than one recipe, a button above the result lists every result and lets you pick the one to craft. The pick is remembered for those ingredients. JEI's \"+\" picks the recipe it moved in."
+description = "No more recipe conflicts: when the ingredients in a crafting grid match more than one recipe, a button above the result lists every result and lets you pick the one to craft. The pick is remembered for those ingredients. Works in the inventory, crafting tables and mod crafting menus such as AE2's crafting terminal."
 authors = ["TheIllusiveC4", "Illusive Soulworks"]
 license = "LGPL-3.0-or-later"
 license_url = "https://github.com/TheIllusiveC4/Polymorph/blob/a2dc1e5a91e5694943d84e32caa729cd477098e3/COPYING.LESSER"
@@ -10,55 +10,3 @@ homepage = "https://github.com/TheIllusiveC4/Polymorph"
 api = "0.2"
 side = "both"
 capabilities = ["registries"]
-
-# The Horizon build the native code compiles against: Horizon Nightly 2026-11-22.
-[native]
-game = "26.3"
-horizon = "2b77287de099c9316278ba7ac4d83590fdb7ef30"
-mixins = "e59da9094f0c2fdda6c627fe9eff22dec6a906f0"
-
-# The game's crafting matcher (`RecipeManager.getRecipeFor`): every grid's result on client and server, the
-# take and its remainders, the crafter. Polymorph's choice among all matching recipes replaces the first match.
-[[native.module]]
-id = "matcher"
-file = "crates/horizon-client/src/crafting/mod_kinds.rs"
-name = "polymorph_match"
-source = "src/game/matcher.rs"
-
-[[native.mixin]]
-id = "find_recipe"
-target = "horizon_client::crafting::mod_kinds::Recipes::find_with_dimensions"
-kind = "HEAD"
-cancellable = true
-helper = "src/game/find_recipe.rs"
-bindings = [
-    { name = "this", ty = "&Recipes", value = "self" },
-    { name = "context", ty = "&LoopContext", value = "context" },
-    { name = "grid", ty = "&[Option<ItemStack>]", value = "grid" },
-    { name = "size", ty = "usize", value = "size" },
-    { name = "width", ty = "usize", value = "width" },
-    { name = "height", ty = "usize", value = "height" },
-    { name = "map_scale", ty = "&dyn Fn(i32) -> Option<u8>", value = "map_scale" },
-]
-
-# The server's tick for its players' crafting menus: after a choice, every open grid's result is made again.
-[[native.module]]
-id = "refresh"
-file = "crates/horizon-client/src/game/network/lan_crafting.rs"
-name = "polymorph_refresh"
-source = "src/game/refresh.rs"
-
-[[native.mixin]]
-id = "server_tick"
-target = "horizon_client::game::lan_crafting::Game<'_>::lan_tables_tick"
-kind = "HEAD"
-helper = "src/game/server_tick.rs"
-bindings = [{ name = "game", ty = "&mut Game<'_>", value = "&mut *self" }]
-
-# A viewer's "+" (JEI's `transfer_recipe_id`): Polymorph's JEI plugin selects the recipe it moved in.
-[[native.mixin]]
-id = "viewer_transfer"
-target = "horizon_client::game::recipe_book::Game<'_>::transfer_viewer_recipe_id"
-kind = "HEAD"
-helper = "src/game/viewer_transfer.rs"
-bindings = [{ name = "recipe", ty = "&str", value = "recipe" }]

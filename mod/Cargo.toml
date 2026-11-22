@@ -1,6 +1,5 @@
 [package]
 # Polymorph for Horizon. Cargo's name and version are not the mod's identity: horizon-mod.toml is.
-# The crate is named after the mod id: the game-side code in src/game/ calls it as `polymorph::`.
 name = "polymorph"
 version = "0.1.0"
 edition = "2024"

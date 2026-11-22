@@ -1,8 +1,36 @@
 # Findings: Polymorph on Horizon
 
-Checked 2026-11-22 against Horizon `2b77287de099c9316278ba7ac4d83590fdb7ef30` (Nightly 2026-11-22, the build JEI
-0.4.5, TOP and AE2 use), horizon-mixins `e59da9094f0c2fdda6c627fe9eff22dec6a906f0`. Polymorph source: 1.2.0+1.21.1,
-`TheIllusiveC4/Polymorph` @ `a2dc1e5` (common/ is all the logic; the Forge/NeoForge/Fabric folders are loaders).
+Polymorph source: 1.2.0+1.21.1, `TheIllusiveC4/Polymorph` @ `a2dc1e5` (common/ is all the logic; the
+Forge/NeoForge/Fabric folders are loaders). First checked 2026-11-22 against Horizon `2b77287` (Nightly 2026-11-22).
+
+## Status (2026-11-22): wasm mod waiting on a Horizon PR
+
+Horizon `2b77287` can't let a mod pick among matching crafting recipes (details below). Jan chose an upstream
+PR: branch `crafting-recipe-choice` on a fork of horizon-rust/horizon, based on main `b1947c6`, which adds
+
+- hook `crafting_recipe_choice` (both sides, loop context, listen): asked from
+  `Recipes::find_with_dimensions` when a grid matches two or more recipes, with the grid (`width` wide), the
+  qualified recipe ids, their results and `choice` (0 = first match). The result slot, the take's re-check, its
+  remainders, `item_crafted` and the crafter all go through that function, so they all follow the answer.
+  With no listener the matcher stops at the first match as before.
+- `PlayerRef::crafting_changed(host)` (server): makes the player's open crafting results again (inventory grid,
+  crafting table, mod crafting menu) without a grid change, as Polymorph's selection packet calls
+  `slotsChanged`.
+
+The mod (`mod/src/glue.rs`): the hook answers from `engine::choose` on both sides. A click in the selector keeps
+the pick locally (client prediction) and sends `polymorph:pick` (picked id + the set of matching ids) on the next
+`client_tick_post` (the click hook's host can't send). The server keeps it per set of ids and calls
+`crafting_changed` for that player on its next tick. Choices are per set of recipes, shared by every player on
+a server (the hook has no player); Polymorph keeps one per player.
+
+Checking before the hook is in a build: copy `mod/` elsewhere, point `horizon-mod-api` at the branch's
+`crates/horizon-mod-api`, add `[workspace]`, `cargo test`. Packaging (`cargo horizon-mod build --wasm`) needs an
+SDK that has the hook, so it waits for a Horizon build with the PR.
+
+Dropped with the mixins: JEI's "+" choosing the recipe it moved in (was a mixin on `transfer_viewer_recipe_id`).
+The selector still shows after "+", so the player picks there.
+
+The rest of this file is the investigation that led here, kept for reference.
 
 ## Why native, with mixins
 
@@ -39,7 +67,7 @@ pick (or the marker on it). With a hook, Polymorph can be a wasm mod with no mix
 
 The rest of this file describes the mixin design, kept for reference.
 
-## Pitfalls
+## Pitfalls (of the mixin design)
 
 - A mixin helper may not have generic (or lifetime) parameters, and `find_with_dimensions` returns
   `Option<(&str, ItemStack)>` borrowed from `self`. With several reference parameters the helper can't elide that

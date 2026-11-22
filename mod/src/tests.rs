@@ -1,7 +1,7 @@
 //! Polymorph's choice and layout, without the game. A stack here is an item name.
 
 use crate::choice::{Choices, MAX_SHOWN, RECENT};
-use crate::engine::qualified;
+use crate::engine::{Pick, qualified};
 use crate::layout;
 
 type S = &'static str;
@@ -111,4 +111,23 @@ fn polymorphs_layout() {
     assert_eq!(three.iter().map(|r| r[0]).collect::<Vec<_>>(), vec![95.0, 120.0, 145.0]);
     assert!(layout::inside(b, [124.0, 13.0]));
     assert!(!layout::inside(b, [140.0, 13.0]));
+}
+
+#[test]
+fn the_server_makes_the_pick_it_hears() {
+    // The server's own record of the grid, as its matcher saw it.
+    let mut server: Choices<S> = Choices::default();
+    assert_eq!(server.choose(2, grid(&LOGS), ids(&["a:planks", "b:planks"]), vec!["a", "b"], same), 0);
+    // The client's pick names the recipes, not the grid.
+    let pick = Pick { id: "b:planks".into(), set: ids(&["a:planks", "b:planks"]) };
+    let heard = Pick::decode(&pick.encode()).expect("a pick survives the trip");
+    assert_eq!(heard, pick);
+    assert!(server.pick(&heard.set, &heard.id));
+    assert!(server.take_changed());
+    assert_eq!(server.conflict(2, &LOGS, same).map(|c| c.chosen), Some(1), "the selector shows the pick");
+    assert_eq!(server.choose(2, grid(&LOGS), ids(&["a:planks", "b:planks"]), vec!["a", "b"], same), 1);
+    // A recipe outside the set is refused, and so is a message that names none.
+    assert!(!server.pick(&heard.set, "c:planks"));
+    assert_eq!(Pick::decode(b"b:planks\nb:planks"), None);
+    assert_eq!(Pick::decode(b"c:x\na:x\nb:x"), None);
 }

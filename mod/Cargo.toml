@@ -1,0 +1,17 @@
+[package]
+# Polymorph for Horizon. Cargo's name and version are not the mod's identity: horizon-mod.toml is.
+# The crate is named after the mod id: the game-side code in src/game/ calls it as `polymorph::`.
+name = "polymorph"
+version = "0.1.0"
+edition = "2024"
+license = "LGPL-3.0-or-later"
+publish = false
+description = "Polymorph for Horizon: pick the result when a crafting grid matches more than one recipe."
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+# The pinned SDK's API crate, fetched into .horizon/sdk/ by any `cargo horizon-mod` command (the
+# launcher builds against its own copy of the same build).
+horizon-mod-api = { path = ".horizon/sdk/api/crates/horizon-mod-api" }

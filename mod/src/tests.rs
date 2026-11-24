@@ -1,6 +1,6 @@
 //! Polymorph's choice and layout, without the game. A stack here is an item name.
 
-use crate::choice::{Choices, KEPT, MAX_SHOWN, RECENT};
+use crate::choice::{Choices, KEPT, MAX_SHOWN, Players, RECENT};
 use crate::engine::{Pick, qualified};
 use crate::layout;
 
@@ -131,4 +131,22 @@ fn only_so_many_sets_keep_a_pick() {
     // The first set's pick is forgotten: back to its first match (the last pick names another recipe).
     assert_eq!(c.choose(2, grid(&LOGS), sets[0].clone(), vec!["a", "b"], same), 0);
     assert_eq!(c.choose(2, grid(&LOGS), sets[KEPT].clone(), vec!["a", "b"], same), 1);
+}
+
+#[test]
+fn each_player_keeps_their_own_pick() {
+    let mut players: Players<S> = Players::default();
+    let set = ids(&["a:planks", "b:planks"]);
+    let (alex, sam) = (1, 2);
+    assert_eq!(players.choose(Some(alex), 2, grid(&LOGS), set.clone(), vec!["a", "b"], same), 0);
+    assert_eq!(players.choose(Some(sam), 2, grid(&LOGS), set.clone(), vec!["a", "b"], same), 0);
+    assert!(players.of(alex).pick(&set, "b:planks"));
+    assert_eq!(players.choose(Some(alex), 2, grid(&LOGS), set.clone(), vec!["a", "b"], same), 1);
+    assert_eq!(players.choose(Some(sam), 2, grid(&LOGS), set.clone(), vec!["a", "b"], same), 0, "sam's stays");
+    // A crafter block (nobody's grid) makes the first match.
+    assert_eq!(players.choose(None, 2, grid(&LOGS), set.clone(), vec!["a", "b"], same), 0);
+    // Alex left and came back: the pick went with them; a pick for a set alex never matched since is refused.
+    players.forget(alex);
+    assert!(!players.of(alex).pick(&set, "b:planks"));
+    assert_eq!(players.choose(Some(alex), 2, grid(&LOGS), set, vec!["a", "b"], same), 0);
 }

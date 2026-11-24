@@ -10,7 +10,9 @@ PR: branch `crafting-recipe-choice` on a fork of horizon-rust/horizon, based on 
 
 - hook `crafting_recipe_choice` (both sides, loop context, listen): asked from
   `Recipes::find_with_dimensions` when a grid matches two or more recipes, with the grid (`width` wide), the
-  qualified recipe ids, their results and `choice` (0 = first match). The result slot, the take's re-check, its
+  qualified recipe ids, their results, `player` (uuid of the player whose grid it is), `crafter` (a crafter
+  block's position) and `choice` (0 = first match). `player` and `crafter` came with the PR's second commit
+  (6a95be68, after the review asked for the player); both are `None` for `RecipesHost` and a sheep's dye mix. The result slot, the take's re-check, its
   remainders, `item_crafted` and the crafter all go through that function, so they all follow the answer.
   With no listener the matcher stops at the first match as before.
 - `PlayerRef::crafting_changed(host)` (server): makes the player's open crafting results again (inventory grid,
@@ -22,8 +24,9 @@ The mod (`mod/src/glue.rs`): the hook answers from `engine::choose` on both side
 shared host); only when that is accepted is the pick kept locally (client prediction). `UnsupportedPeer` means the
 server has no Polymorph: the selector hides for that server. The server takes a pick only for a set it matched
 itself lately (`Choices::recent`), keeps at most `KEPT` (256) sets, and on its next tick calls `crafting_changed`
-for every player, since choices are per set of recipes and shared by all players (the hook has no player; Polymorph
-keeps one per player). Per-player choices need the player in the hook: noted on upstream PR #20984 (2026-11-24 review).
+for the players who picked (not from the handler: `crafting_changed` refuses the player whose turn it is).
+Since 0.2.0 each player keeps their own choices (`choice::Players`, by the hook's `player`), as in Polymorph; they
+go when the player logs out. A grid nobody crafts in (a crafter block) makes the first match.
 
 Checking before the hook is in a build: copy `mod/` elsewhere, point `horizon-mod-api` at the branch's
 `crates/horizon-mod-api`, add `[workspace]`, `cargo test`. Packaging (`cargo horizon-mod build --wasm`) needs an
@@ -115,6 +118,7 @@ Jan's 20-30 minute launcher build, inject them by hand into a checkout of the pi
 - Furnaces (per-block choice saved with the block, `FurnaceRecipesWidget`): the cooking lookup is
   `Recipes::cook_index`, first recipe per input. Vanilla has no smelting conflicts; mods do.
 - Smithing (`SmithingMenu`, `station_recipes.smithing_result`).
-- Choices are kept until the game closes (Polymorph saves the player's one selected recipe).
+- Choices are kept until the player logs out or the game closes (Polymorph saves the player's one selected recipe).
+- Crafter blocks: always the first match (no selector on the crafter screen yet).
 - A client on another server (dedicated or LAN host with Polymorph) can't choose: needs a payload to the server.
 - `/polymorph conflicts` (Polymorph's command listing all conflicts to logs/conflicts.log).

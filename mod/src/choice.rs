@@ -6,6 +6,8 @@
 //! change" in Polymorph's words, and also after they did). The last recipe picked by hand is tried next, then the
 //! first match, as in Polymorph.
 //!
+//! Polymorph keeps the choices per player ([`Players`]): one player's pick never changes what another makes.
+//!
 //! The game reaches this through [`crate::engine`] (its `crafting_recipe_choice` hook); everything here is plain data so it can be tested.
 
 use std::collections::{HashMap, VecDeque};
@@ -142,6 +144,47 @@ impl<S: Clone> Choices<S> {
     /// Whether a choice changed since the last call.
     pub fn take_changed(&mut self) -> bool {
         std::mem::take(&mut self.changed)
+    }
+}
+
+/// Every player's choices, by uuid.
+#[derive(Debug)]
+pub struct Players<S> {
+    by_player: HashMap<u128, Choices<S>>,
+}
+
+impl<S> Default for Players<S> {
+    fn default() -> Self {
+        Self { by_player: HashMap::new() }
+    }
+}
+
+impl<S: Clone> Players<S> {
+    /// [`Choices::choose`] for the grid of `player`; a grid nobody crafts in (`None`: a crafter block, a
+    /// mod's lookup) makes the first match, as vanilla, and is not remembered.
+    pub fn choose(
+        &mut self,
+        player: Option<u128>,
+        size: usize,
+        grid: Vec<Option<S>>,
+        ids: Vec<String>,
+        outputs: Vec<S>,
+        same: impl Fn(&S, &S) -> bool,
+    ) -> usize {
+        match player {
+            Some(player) => self.of(player).choose(size, grid, ids, outputs, same),
+            None => 0,
+        }
+    }
+
+    /// `player`'s choices.
+    pub fn of(&mut self, player: u128) -> &mut Choices<S> {
+        self.by_player.entry(player).or_default()
+    }
+
+    /// The player left: their choices go.
+    pub fn forget(&mut self, player: u128) {
+        self.by_player.remove(&player);
     }
 }
 

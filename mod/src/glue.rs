@@ -2,15 +2,15 @@
 //! result slot (the inventory, a crafting table, a crafter, a mod's crafting menu such as AE2's terminal).
 //!
 //! A pick is kept here for the client's prediction and sent to the server ([`engine::PICK`]), whose handler
-//! keeps it and has every player's crafting results made again on its next tick (the choice is per set of
-//! recipes, shared on a server). A server without Polymorph refuses the pick: nothing changes and the selector
+//! keeps it and has that player's crafting results made again on its next tick (each player keeps their own
+//! choices, as in Polymorph). A server without Polymorph refuses the pick: nothing changes and the selector
 //! hides there. On both sides the game asks `crafting_recipe_choice` whenever a grid matches more than one recipe.
 
 use std::sync::{Arc, Mutex};
 
 use mod_api::{
     ClientHost, CraftingRecipeChoiceEvent, DrawContext, Flow, Hooks, IPayloadContext, IPayloadHandler, ItemResource,
-    ItemStack, LoopContext, MenuRef, MenuSlotKind, PayloadBytes, PayloadHandleError, PayloadId, PayloadSendError, Registrar,
+    ItemStack, LoopContext, MenuRef, MenuSlotKind, PayloadBytes, PayloadHandleError, PayloadId, PayloadSendError, PlayerLoggedOutEvent, Registrar,
     RegistrationContext, ScreenMouseButtonPressedPreEvent, ScreenRenderPostEvent, ScreenView, ServerHost,
     ServerTickEvent, Text, TooltipElement,
 };
@@ -46,11 +46,10 @@ fn no_polymorph() -> std::sync::MutexGuard<'static, Option<ServerKey>> {
     NO_POLYMORPH.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// Server: a pick arrived since the last tick. The choice is kept per set of recipes for everyone on this
-/// server (the hook names no player), so every player's open grids are made again, not only the picker's.
-static STALE: Mutex<bool> = Mutex::new(false);
+/// Server: the players whose pick arrived since the last tick; their open grids are made again then.
+static STALE: Mutex<Vec<u128>> = Mutex::new(Vec::new());
 
-fn stale() -> std::sync::MutexGuard<'static, bool> {
+fn stale() -> std::sync::MutexGuard<'static, Vec<u128>> {
     STALE.lock().unwrap_or_else(|e| e.into_inner())
 }
 
@@ -61,11 +60,13 @@ struct PickHandler;
 impl IPayloadHandler for PickHandler {
     fn handle(&self, payload: PayloadBytes, context: &mut dyn IPayloadContext) -> Result<(), PayloadHandleError> {
         let Some(pick) = Pick::decode(&payload.0) else { return Ok(()) };
-        if context.player().is_err() {
-            return Ok(());
-        }
-        if engine::with(|c| c.pick(&pick.set, &pick.id)) {
-            *stale() = true;
+        let Ok(player) = context.player() else { return Ok(()) };
+        let uuid = player.uuid();
+        if engine::with(uuid, |c| c.pick(&pick.set, &pick.id)) {
+            let mut stale = stale();
+            if !stale.contains(&uuid) {
+                stale.push(uuid);
+            }
         }
         Ok(())
     }
@@ -73,6 +74,7 @@ impl IPayloadHandler for PickHandler {
 
 /// The open screen's grid and result slot, with the conflict recorded for that grid.
 struct Shown {
+    player: u128,
     menu: MenuRef,
     size: usize,
     grid: Vec<Option<ItemStack>>,
@@ -96,7 +98,9 @@ fn shown(host: &dyn ClientHost, screen: &ScreenView<'_>) -> Option<Shown> {
     if no_polymorph().as_ref().is_some_and(|k| Some(k) == key.as_ref()) {
         return None;
     }
-    let menu = host.local_player()?.container_menu(host)?;
+    let player = host.local_player()?;
+    let uuid = player.uuid();
+    let menu = player.container_menu(host)?;
     let kinds = menu.slot_kinds(host)?;
     let boxes = menu.slot_boxes(host)?;
     let result = kinds.iter().position(|k| matches!(k, MenuSlotKind::Result))?;
@@ -105,13 +109,13 @@ fn shown(host: &dyn ClientHost, screen: &ScreenView<'_>) -> Option<Shown> {
     let size = (1..=3).find(|s| s * s == cells.len())?;
     let slot = boxes.get(result).copied().flatten()?;
     let grid = cells.iter().map(|&s| menu.slot(host, s)).collect::<Option<Vec<_>>>()?;
-    let (ids, outputs, chosen) = engine::with(|c| {
+    let (ids, outputs, chosen) = engine::with(uuid, |c| {
         c.conflict(size, &grid, engine::same).map(|k| (k.ids.clone(), k.outputs.clone(), k.chosen))
     })?;
     if ids.len() < 2 {
         return None;
     }
-    Some(Shown { menu, size, grid, button: layout::button(slot), ids, outputs, chosen })
+    Some(Shown { player: uuid, menu, size, grid, button: layout::button(slot), ids, outputs, chosen })
 }
 
 fn sprite_or(draw: &mut dyn DrawContext, name: &str, side: f32, rect: [f32; 4], fallback: u32) {
@@ -149,19 +153,21 @@ impl Hooks for Polymorph {
     /// `RecipeManager.getRecipeFor` with Polymorph's choice, on whichever side matches the grid.
     fn crafting_recipe_choice(&self, _context: &dyn LoopContext, event: &mut CraftingRecipeChoiceEvent<'_>) {
         let width = event.width as usize;
-        event.choice = engine::choose(width, event.grid, event.recipes, event.results) as u32;
+        event.choice = engine::choose(event.player, width, event.grid, event.recipes, event.results) as u32;
     }
 
     fn server_tick(&self, host: &mut dyn ServerHost, _event: &mut ServerTickEvent<'_>) {
-        if !std::mem::take(&mut *stale()) {
-            return;
-        }
-        let players: Vec<u128> = host.players().server_players().iter().map(|p| p.uuid()).collect();
+        let players = std::mem::take(&mut *stale());
         for uuid in players {
             if let Some(player) = host.player(uuid) {
                 player.crafting_changed(host);
             }
         }
+    }
+
+    fn player_logged_out(&self, _host: &mut dyn ServerHost, event: &mut PlayerLoggedOutEvent<'_>) {
+        engine::forget(event.player);
+        stale().retain(|&p| p != event.player);
     }
 
     fn screen_render_post(&self, host: &dyn ClientHost, event: &mut ScreenRenderPostEvent<'_>) {
@@ -232,7 +238,7 @@ impl Hooks for Polymorph {
                 let pick = Pick { id: id.clone(), set };
                 match host.queue_payload_to_server(&PayloadId(engine::PICK.into()), PayloadBytes(pick.encode())) {
                     Ok(_) => {
-                        engine::with(|c| c.select(s.size, &s.grid, &id, engine::same));
+                        engine::with(s.player, |c| c.select(s.size, &s.grid, &id, engine::same));
                     }
                     Err(PayloadSendError::UnsupportedPeer(_)) => *no_polymorph() = server_key(host),
                     Err(e) => eprintln!("[polymorph] pick not sent: {e:?}"),

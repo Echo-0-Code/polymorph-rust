@@ -2,23 +2,35 @@
 //!
 //! The hook `crafting_recipe_choice` asks [`choose`] on both sides: the client's answer is its prediction,
 //! the server's is what is made. A pick on the client screen is kept here at once (so the prediction follows)
-//! and sent to the server as [`Pick`], whose handler keeps it there too. Choices are kept per set of matching
-//! recipes, the same on both sides, so both answer alike.
+//! and sent to the server as [`Pick`], whose handler keeps it there too. As in Polymorph, each player keeps
+//! their own choices (the hook names the player whose grid it is); a grid matched on nobody's behalf (a
+//! crafter block, a mod's lookup) makes the first match, as vanilla.
 
 use std::sync::{Mutex, MutexGuard};
 
 use mod_api::ItemStack;
 
-use crate::choice::Choices;
+use crate::choice::{Choices, Players};
 
 /// The client's pick, sent to the server (`play_to_server`).
 pub const PICK: &str = "polymorph:pick";
 
-static CHOICES: Mutex<Option<Choices<ItemStack>>> = Mutex::new(None);
+static PLAYERS: Mutex<Option<Players<ItemStack>>> = Mutex::new(None);
 
-pub(crate) fn with<R>(f: impl FnOnce(&mut Choices<ItemStack>) -> R) -> R {
-    let mut guard: MutexGuard<'_, _> = CHOICES.lock().unwrap_or_else(|e| e.into_inner());
-    f(guard.get_or_insert_with(Choices::default))
+fn players() -> MutexGuard<'static, Option<Players<ItemStack>>> {
+    PLAYERS.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// `f` on `player`'s choices.
+pub(crate) fn with<R>(player: u128, f: impl FnOnce(&mut Choices<ItemStack>) -> R) -> R {
+    f(players().get_or_insert_with(Players::default).of(player))
+}
+
+/// A player left: their choices go.
+pub(crate) fn forget(player: u128) {
+    if let Some(all) = players().as_mut() {
+        all.forget(player);
+    }
 }
 
 /// Same kind of item, count aside (`ItemStack.isSameItemSameComponents`).
@@ -26,12 +38,25 @@ pub(crate) fn same(a: &ItemStack, b: &ItemStack) -> bool {
     a.is_stackable_with(b)
 }
 
-/// The matcher found more than one recipe for `grid` (`width` wide, row by row): which one it makes, an
-/// index into `ids`.
-pub fn choose(width: usize, grid: &[Option<ItemStack>], ids: &[String], outputs: &[ItemStack]) -> usize {
+/// The matcher found more than one recipe for `grid` (`width` wide, row by row), crafted by `player`
+/// (none for a grid nobody crafts in): which one it makes, an index into `ids`.
+pub fn choose(
+    player: Option<u128>,
+    width: usize,
+    grid: &[Option<ItemStack>],
+    ids: &[String],
+    outputs: &[ItemStack],
+) -> usize {
     let ids: Vec<String> = ids.iter().map(|id| qualified(id)).collect();
     let n = ids.len();
-    let chosen = with(|c| c.choose(width, grid.to_vec(), ids, outputs.to_vec(), same));
+    let chosen = players().get_or_insert_with(Players::default).choose(
+        player,
+        width,
+        grid.to_vec(),
+        ids,
+        outputs.to_vec(),
+        same,
+    );
     chosen.min(n.saturating_sub(1))
 }
 

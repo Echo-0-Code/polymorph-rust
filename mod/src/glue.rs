@@ -11,11 +11,11 @@ use std::sync::{Arc, Mutex};
 use mod_api::{
     ClientHost, CraftingRecipeChoiceEvent, DrawContext, Flow, Hooks, IPayloadContext, IPayloadHandler, ItemResource,
     ItemStack, LoopContext, MenuRef, MenuSlotKind, PayloadBytes, PayloadHandleError, PayloadId, PayloadSendError, PlayerLoggedOutEvent, Registrar,
-    RegistrationContext, ScreenMouseButtonPressedPreEvent, ScreenRenderPostEvent, ScreenView, ServerHost,
+    Identifier, RegistrationContext, ScreenMouseButtonPressedPreEvent, ScreenRenderPostEvent, ScreenView, ServerHost,
     ServerTickEvent, Text, TooltipElement,
 };
 
-use crate::engine::{self, Pick};
+use crate::engine::{self, Listed, Pick};
 use crate::layout::{self, ITEM_INSET};
 
 const SELECTOR: &str = "polymorph:gui/sprites/selector_button";
@@ -72,6 +72,34 @@ impl IPayloadHandler for PickHandler {
     }
 }
 
+/// `SPacketRecipesList.handle` on the client: the server's list for this player's grid, which the selector shows
+/// while the screen's grid is still that one.
+struct ListHandler;
+
+impl IPayloadHandler for ListHandler {
+    fn handle(&self, payload: PayloadBytes, _context: &mut dyn IPayloadContext) -> Result<(), PayloadHandleError> {
+        if let Some(list) = Listed::decode(&payload.0) {
+            *engine::FROM_SERVER.lock().unwrap_or_else(|e| e.into_inner()) = Some(list);
+        }
+        Ok(())
+    }
+}
+
+/// The server's list, when it is for `grid` (`size` wide): its ids, outputs and chosen index.
+fn listed_for(host: &dyn ClientHost, size: usize, grid: &[Option<ItemStack>]) -> Option<(Vec<String>, Vec<ItemStack>, usize)> {
+    let list = engine::FROM_SERVER.lock().unwrap_or_else(|e| e.into_inner()).clone()?;
+    let cells: Vec<Option<String>> = grid.iter().map(|c| c.as_ref().map(|s| s.item().id(host))).collect();
+    if list.size != size || list.cells != cells {
+        return None;
+    }
+    let outputs = list
+        .outputs
+        .iter()
+        .map(|(item, count)| ItemStack::new(host.item_key(&Identifier::parse(item).ok()?)?, *count))
+        .collect::<Option<Vec<_>>>()?;
+    Some((list.ids, outputs, list.chosen))
+}
+
 /// The open screen's grid and result slot, with the conflict recorded for that grid.
 struct Shown {
     player: u128,
@@ -109,9 +137,12 @@ fn shown(host: &dyn ClientHost, screen: &ScreenView<'_>) -> Option<Shown> {
     let size = (1..=3).find(|s| s * s == cells.len())?;
     let slot = boxes.get(result).copied().flatten()?;
     let grid = cells.iter().map(|&s| menu.slot(host, s)).collect::<Option<Vec<_>>>()?;
+    // In single player the server's matcher runs in this process and keeps the player's conflicts here; a
+    // client of another machine has only the server's list.
     let (ids, outputs, chosen) = engine::with(uuid, |c| {
         c.conflict(size, &grid, engine::same).map(|k| (k.ids.clone(), k.outputs.clone(), k.chosen))
-    })?;
+    })
+    .or_else(|| listed_for(host, size, &grid))?;
     if ids.len() < 2 {
         return None;
     }
@@ -147,7 +178,8 @@ struct Polymorph;
 #[mod_api::horizon_mod]
 impl Hooks for Polymorph {
     fn register(&self, r: &mut dyn Registrar, _cx: &RegistrationContext) {
-        r.payload_handlers().registrar("1").optional().play_to_server(PayloadId(engine::PICK.into()), Arc::new(PickHandler));
+        r.payload_handlers().registrar("1").optional().play_to_server(PayloadId(engine::PICK.into()), Arc::new(PickHandler))
+            .play_to_client(PayloadId(engine::LIST.into()), Some(Arc::new(ListHandler)));
     }
 
     /// `RecipeManager.getRecipeFor` with Polymorph's choice, on whichever side matches the grid.
@@ -157,6 +189,19 @@ impl Hooks for Polymorph {
     }
 
     fn server_tick(&self, host: &mut dyn ServerHost, _event: &mut ServerTickEvent<'_>) {
+        for (uuid, c) in engine::with_outbox(|o| o.take()) {
+            let Some(player) = host.player(uuid) else { continue };
+            let item = |s: &ItemStack| s.item().id(host);
+            let list = Listed {
+                size: c.size,
+                cells: c.grid.iter().map(|cell| cell.as_ref().map(item)).collect(),
+                chosen: c.chosen,
+                outputs: c.outputs.iter().map(|s| (item(s), s.count())).collect(),
+                ids: c.ids,
+            };
+            // A client without Polymorph (an optional channel it lacks) refuses it; nothing to do then.
+            let _ = host.send_payload_to_players(&[player], &PayloadId(engine::LIST.into()), PayloadBytes(list.encode()));
+        }
         let players = std::mem::take(&mut *stale());
         for uuid in players {
             if let Some(player) = host.player(uuid) {
@@ -239,6 +284,9 @@ impl Hooks for Polymorph {
                 match host.queue_payload_to_server(&PayloadId(engine::PICK.into()), PayloadBytes(pick.encode())) {
                     Ok(_) => {
                         engine::with(s.player, |c| c.select(s.size, &s.grid, &id, engine::same));
+                        if let Some(list) = engine::FROM_SERVER.lock().unwrap_or_else(|e| e.into_inner()).as_mut().filter(|l| l.ids == s.ids) {
+                            list.chosen = i;
+                        }
                     }
                     Err(PayloadSendError::UnsupportedPeer(_)) => *no_polymorph() = server_key(host),
                     Err(e) => eprintln!("[polymorph] pick not sent: {e:?}"),

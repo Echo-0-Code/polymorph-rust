@@ -1,7 +1,7 @@
 //! Polymorph's choice and layout, without the game. A stack here is an item name.
 
-use crate::choice::{Choices, KEPT, MAX_SHOWN, Players, RECENT};
-use crate::engine::{Pick, qualified};
+use crate::choice::{Choices, Conflict, KEPT, MAX_SHOWN, Outbox, Players, RECENT};
+use crate::engine::{Listed, Pick, qualified};
 use crate::layout;
 
 type S = &'static str;
@@ -149,4 +149,48 @@ fn each_player_keeps_their_own_pick() {
     players.forget(alex);
     assert!(!players.of(alex).pick(&set, "b:planks"));
     assert_eq!(players.choose(Some(alex), 2, grid(&LOGS), set, vec!["a", "b"], same), 0);
+}
+
+#[test]
+fn a_player_is_sent_their_list_once_per_change() {
+    let mut out: Outbox<S> = Outbox::default();
+    let conflict = |grid: &[Option<S>], chosen| Conflict {
+        size: 2,
+        grid: grid.to_vec(),
+        ids: ids(&["a:planks", "b:planks"]),
+        outputs: vec!["a", "b"],
+        chosen,
+    };
+    // The server matches the same grid many times: one list goes out.
+    out.offer(7, conflict(&LOGS, 0), same);
+    out.offer(7, conflict(&LOGS, 0), same);
+    assert_eq!(out.take().len(), 1);
+    out.offer(7, conflict(&LOGS, 0), same);
+    assert!(out.take().is_empty());
+    // A pick, or the same recipes in another grid, sends it again.
+    out.offer(7, conflict(&LOGS, 1), same);
+    let mut moved = LOGS;
+    moved.swap(0, 3);
+    out.offer(7, conflict(&moved, 1), same);
+    let sent = out.take();
+    assert_eq!(sent.len(), 1, "only the latest list waits");
+    assert_eq!(sent[0].1.grid, moved.to_vec());
+    // Back after logging out: sent again.
+    out.forget(7);
+    out.offer(7, conflict(&moved, 1), same);
+    assert_eq!(out.take().len(), 1);
+}
+
+#[test]
+fn the_list_survives_the_trip() {
+    let list = Listed {
+        size: 2,
+        cells: vec![Some("minecraft:oak_log".into()), None, None, None],
+        chosen: 1,
+        ids: ids(&["minecraft:oak_planks", "test:b"]),
+        outputs: vec![("minecraft:oak_planks".into(), 4), ("minecraft:stick".into(), 8)],
+    };
+    assert_eq!(Listed::decode(&list.encode()), Some(list.clone()));
+    assert_eq!(Listed::decode(b"2 5\nminecraft:oak_log\t\t\t\na:x\tminecraft:stick\t1\nb:x\tminecraft:stick\t2"), None);
+    assert_eq!(Listed::decode(b"2 0\nminecraft:oak_log\na:x\tminecraft:stick\t1\nb:x\tminecraft:stick\t2"), None);
 }

@@ -1,6 +1,6 @@
 id = "polymorph"
 name = "Polymorph"
-version = "0.2.0"
+version = "0.2.1"
 description = "No more recipe conflicts: when the ingredients in a crafting grid match more than one recipe, a button above the result lists every result and lets you pick the one to craft. The pick is remembered for those ingredients. Works in the inventory, crafting tables and mod crafting menus such as AE2's crafting terminal."
 authors = ["TheIllusiveC4", "Illusive Soulworks"]
 license = "LGPL-3.0-or-later"

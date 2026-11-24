@@ -27,6 +27,11 @@ itself lately (`Choices::recent`), keeps at most `KEPT` (256) sets, and on its n
 for the players who picked (not from the handler: `crafting_changed` refuses the player whose turn it is).
 Since 0.2.0 each player keeps their own choices (`choice::Players`, by the hook's `player`), as in Polymorph; they
 go when the player logs out. A grid nobody crafts in (a crafter block) makes the first match.
+Since 0.2.1 the server also sends each player the list of their grid's matches (`polymorph:list`, Polymorph's
+`SPacketRecipesList`: grid cells, ids, outputs as item id + count, chosen), once per change (`choice::Outbox`). A
+client on another machine (a LAN guest, a dedicated server's player) never matches the grid itself (its result slot
+is the server's), so before 0.2.1 it had no button; it now shows the server's list while its grid is that grid. In
+single player the server's own record in the shared statics is used first.
 
 Checking before the hook is in a build: copy `mod/` elsewhere, point `horizon-mod-api` at the branch's
 `crates/horizon-mod-api`, add `[workspace]`, `cargo test`. Packaging (`cargo horizon-mod build --wasm`) needs an
@@ -120,5 +125,4 @@ Jan's 20-30 minute launcher build, inject them by hand into a checkout of the pi
 - Smithing (`SmithingMenu`, `station_recipes.smithing_result`).
 - Choices are kept until the player logs out or the game closes (Polymorph saves the player's one selected recipe).
 - Crafter blocks: always the first match (no selector on the crafter screen yet).
-- A client on another server (dedicated or LAN host with Polymorph) can't choose: needs a payload to the server.
 - `/polymorph conflicts` (Polymorph's command listing all conflicts to logs/conflicts.log).

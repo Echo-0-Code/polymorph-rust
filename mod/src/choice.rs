@@ -188,6 +188,46 @@ impl<S: Clone> Players<S> {
     }
 }
 
+/// Server: the list of matching recipes each player should be sent (Polymorph's `SPacketRecipesList`). A grid
+/// is matched many times per change, so a list goes out only when it differs from the one the player was last sent.
+#[derive(Debug)]
+pub struct Outbox<S> {
+    sent: HashMap<u128, Conflict<S>>,
+    waiting: Vec<(u128, Conflict<S>)>,
+}
+
+impl<S> Default for Outbox<S> {
+    fn default() -> Self {
+        Self { sent: HashMap::new(), waiting: Vec::new() }
+    }
+}
+
+impl<S: Clone> Outbox<S> {
+    /// `player`'s grid matches `c.ids`, and `c.chosen` is made.
+    pub fn offer(&mut self, player: u128, c: Conflict<S>, same: impl Fn(&S, &S) -> bool) {
+        let unchanged = self.sent.get(&player).is_some_and(|s| {
+            s.size == c.size && s.ids == c.ids && s.chosen == c.chosen && same_grid(&s.grid, &c.grid, &same)
+        });
+        if unchanged {
+            return;
+        }
+        self.sent.insert(player, c.clone());
+        self.waiting.retain(|w| w.0 != player);
+        self.waiting.push((player, c));
+    }
+
+    /// The lists to send now, oldest first.
+    pub fn take(&mut self) -> Vec<(u128, Conflict<S>)> {
+        std::mem::take(&mut self.waiting)
+    }
+
+    /// The player left.
+    pub fn forget(&mut self, player: u128) {
+        self.sent.remove(&player);
+        self.waiting.retain(|w| w.0 != player);
+    }
+}
+
 fn same_grid<S>(a: &[Option<S>], b: &[Option<S>], same: &impl Fn(&S, &S) -> bool) -> bool {
     a.len() == b.len()
         && a.iter().zip(b).all(|pair| match pair {

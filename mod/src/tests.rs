@@ -1,6 +1,6 @@
 //! Polymorph's choice and layout, without the game. A stack here is an item name.
 
-use crate::choice::{Choices, MAX_SHOWN, RECENT};
+use crate::choice::{Choices, KEPT, MAX_SHOWN, RECENT};
 use crate::engine::{Pick, qualified};
 use crate::layout;
 
@@ -55,19 +55,6 @@ fn the_last_pick_counts_in_a_new_set_that_has_it() {
     let other = [Some("log"), Some("log"), None, None];
     // Polymorph's one selected recipe: made where it matches.
     assert_eq!(c.choose(2, grid(&other), ids(&["a:x", "c:x", "b:x"]), vec!["a", "c", "b"], same), 2);
-}
-
-#[test]
-fn a_viewer_transfer_picks_its_recipe() {
-    let mut c: Choices<S> = Choices::default();
-    c.prefer("b:planks");
-    assert_eq!(c.choose(2, grid(&LOGS), ids(&["a:planks", "b:planks"]), vec!["a", "b"], same), 1);
-    // Remembered for that set afterwards.
-    assert_eq!(c.choose(2, grid(&LOGS), ids(&["a:planks", "b:planks"]), vec!["a", "b"], same), 1);
-    // A transfer into a grid without that conflict waits for one that has it.
-    c.prefer("c:stick");
-    let sticks = [Some("planks"), None, Some("planks"), None];
-    assert_eq!(c.choose(2, grid(&sticks), ids(&["a:stick", "c:stick"]), vec!["s", "t"], same), 1);
 }
 
 #[test]
@@ -126,8 +113,22 @@ fn the_server_makes_the_pick_it_hears() {
     assert!(server.take_changed());
     assert_eq!(server.conflict(2, &LOGS, same).map(|c| c.chosen), Some(1), "the selector shows the pick");
     assert_eq!(server.choose(2, grid(&LOGS), ids(&["a:planks", "b:planks"]), vec!["a", "b"], same), 1);
-    // A recipe outside the set is refused, and so is a message that names none.
+    // A recipe outside the set is refused, and so is a set the server never matched.
     assert!(!server.pick(&heard.set, "c:planks"));
+    assert!(!server.pick(&ids(&["x:made", "y:up"]), "x:made"));
     assert_eq!(Pick::decode(b"b:planks\nb:planks"), None);
     assert_eq!(Pick::decode(b"c:x\na:x\nb:x"), None);
+}
+
+#[test]
+fn only_so_many_sets_keep_a_pick() {
+    let mut c: Choices<S> = Choices::default();
+    let sets: Vec<Vec<String>> = (0..KEPT + 1).map(|i| vec![format!("a:{i}"), format!("b:{i}")]).collect();
+    for set in &sets {
+        c.choose(2, grid(&LOGS), set.clone(), vec!["a", "b"], same);
+        assert!(c.pick(set, &set[1]));
+    }
+    // The first set's pick is forgotten: back to its first match (the last pick names another recipe).
+    assert_eq!(c.choose(2, grid(&LOGS), sets[0].clone(), vec!["a", "b"], same), 0);
+    assert_eq!(c.choose(2, grid(&LOGS), sets[KEPT].clone(), vec!["a", "b"], same), 1);
 }

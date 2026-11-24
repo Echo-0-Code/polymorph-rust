@@ -17,11 +17,13 @@ PR: branch `crafting-recipe-choice` on a fork of horizon-rust/horizon, based on 
   crafting table, mod crafting menu) without a grid change, as Polymorph's selection packet calls
   `slotsChanged`.
 
-The mod (`mod/src/glue.rs`): the hook answers from `engine::choose` on both sides. A click in the selector keeps
-the pick locally (client prediction) and sends `polymorph:pick` (picked id + the set of matching ids) on the next
-`client_tick_post` (the click hook's host can't send). The server keeps it per set of ids and calls
-`crafting_changed` for that player on its next tick. Choices are per set of recipes, shared by every player on
-a server (the hook has no player); Polymorph keeps one per player.
+The mod (`mod/src/glue.rs`): the hook answers from `engine::choose` on both sides. A click in the selector sends
+`polymorph:pick` (picked id + the set of matching ids) with `queue_payload_to_server` (the click hook only has a
+shared host); only when that is accepted is the pick kept locally (client prediction). `UnsupportedPeer` means the
+server has no Polymorph: the selector hides for that server. The server takes a pick only for a set it matched
+itself lately (`Choices::recent`), keeps at most `KEPT` (256) sets, and on its next tick calls `crafting_changed`
+for every player, since choices are per set of recipes and shared by all players (the hook has no player; Polymorph
+keeps one per player). Per-player choices need the player in the hook: noted on upstream PR #20984 (2026-11-24 review).
 
 Checking before the hook is in a build: copy `mod/` elsewhere, point `horizon-mod-api` at the branch's
 `crates/horizon-mod-api`, add `[workspace]`, `cargo test`. Packaging (`cargo horizon-mod build --wasm`) needs an

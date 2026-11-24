@@ -3,17 +3,20 @@
 //! Polymorph (`AbstractRecipeData.getRecipe`) keeps one selected recipe per player and makes it while it is
 //! among the grid's matches, else the first match. Here the choice is kept per set of matching recipes, so a
 //! conflict chosen once stays chosen when the same ingredients come back ("as long as the ingredients don't
-//! change" in Polymorph's words, and also after they did). The last recipe picked by hand, and a recipe a
-//! viewer's "+" asked for, are tried next, then the first match, as in Polymorph.
+//! change" in Polymorph's words, and also after they did). The last recipe picked by hand is tried next, then the
+//! first match, as in Polymorph.
 //!
 //! The game reaches this through [`crate::engine`] (its `crafting_recipe_choice` hook); everything here is plain data so it can be tested.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 /// How many grids with a conflict are remembered for the selector (the open screen asks for its own grid).
 pub const RECENT: usize = 16;
 /// Polymorph shows at most 15 results (`AbstractRecipeData.getRecipe`, `recipesList.size() < 15`).
 pub const MAX_SHOWN: usize = 15;
+/// How many sets of recipes keep a pick: the oldest pick is forgotten past this, so a client sending made-up
+/// sets can't grow the server's memory.
+pub const KEPT: usize = 256;
 
 /// One grid whose ingredients match more than one recipe.
 #[derive(Clone, Debug, PartialEq)]
@@ -48,8 +51,8 @@ pub struct Choices<S> {
     by_set: HashMap<Vec<String>, String>,
     /// The recipe last picked by hand: Polymorph's selected recipe.
     last: Option<String>,
-    /// A recipe a viewer's "+" asked for, taken by the next conflict that has it.
-    pending: Option<String>,
+    /// The sets in `by_set`, oldest first.
+    order: VecDeque<Vec<String>>,
     /// Newest first.
     recent: Vec<Conflict<S>>,
     /// A choice changed since [`Choices::take_changed`] last looked: the open grids' results are stale.
@@ -58,7 +61,7 @@ pub struct Choices<S> {
 
 impl<S> Default for Choices<S> {
     fn default() -> Self {
-        Self { by_set: HashMap::new(), last: None, pending: None, recent: Vec::new(), changed: false }
+        Self { by_set: HashMap::new(), order: VecDeque::new(), last: None, recent: Vec::new(), changed: false }
     }
 }
 
@@ -74,11 +77,6 @@ impl<S: Clone> Choices<S> {
         same: impl Fn(&S, &S) -> bool,
     ) -> usize {
         let set = set_of(&ids);
-        if let Some(wanted) = self.pending.as_ref().filter(|p| ids.contains(p)).cloned() {
-            self.pending = None;
-            self.by_set.insert(set.clone(), wanted.clone());
-            self.last = Some(wanted);
-        }
         let position = |id: &String| ids.iter().position(|i| i == id);
         let chosen = self
             .by_set
@@ -105,35 +103,40 @@ impl<S: Clone> Choices<S> {
         let Some(index) = c.ids.iter().position(|i| i == id) else { return false };
         c.chosen = index;
         let set = c.set();
-        self.by_set.insert(set, id.to_owned());
-        self.last = Some(id.to_owned());
-        self.pending = None;
-        self.changed = true;
+        self.keep(set, id);
         true
     }
 
     /// A pick heard from elsewhere (the server hears the client's): `id` is made whenever the matching
-    /// recipes are `set`. False when `id` is not one of them.
+    /// recipes are `set`. Taken only for a set this side matched itself lately (one of the recent conflicts)
+    /// that has `id`, so a client can't make the server keep sets it never crafted. False otherwise.
     pub fn pick(&mut self, set: &[String], id: &str) -> bool {
         let set = set_of(set);
-        if !set.iter().any(|s| s == id) {
-            return false;
-        }
+        let mut known = false;
         for c in self.recent.iter_mut().filter(|c| set_of(&c.ids) == set) {
             if let Some(index) = c.ids.iter().position(|i| i == id) {
                 c.chosen = index;
+                known = true;
             }
         }
-        self.by_set.insert(set, id.to_owned());
-        self.last = Some(id.to_owned());
-        self.pending = None;
-        self.changed = true;
-        true
+        if known {
+            self.keep(set, id);
+        }
+        known
     }
 
-    /// A viewer's "+" moved recipe `id` into a grid: make it if that grid's ingredients match others too.
-    pub fn prefer(&mut self, id: &str) {
-        self.pending = Some(id.to_owned());
+    /// Remembers `id` for `set`, forgetting the oldest set past [`KEPT`].
+    fn keep(&mut self, set: Vec<String>, id: &str) {
+        if self.by_set.insert(set.clone(), id.to_owned()).is_none() {
+            self.order.push_back(set);
+            while self.order.len() > KEPT {
+                if let Some(old) = self.order.pop_front() {
+                    self.by_set.remove(&old);
+                }
+            }
+        }
+        self.last = Some(id.to_owned());
+        self.changed = true;
     }
 
     /// Whether a choice changed since the last call.

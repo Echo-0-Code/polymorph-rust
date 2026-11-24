@@ -2,14 +2,15 @@
 //! result slot (the inventory, a crafting table, a crafter, a mod's crafting menu such as AE2's terminal).
 //!
 //! A pick is kept here for the client's prediction and sent to the server ([`engine::PICK`]), whose handler
-//! keeps it and has the player's crafting results made again on its next tick. On both sides the game asks
-//! `crafting_recipe_choice` whenever a grid matches more than one recipe.
+//! keeps it and has every player's crafting results made again on its next tick (the choice is per set of
+//! recipes, shared on a server). A server without Polymorph refuses the pick: nothing changes and the selector
+//! hides there. On both sides the game asks `crafting_recipe_choice` whenever a grid matches more than one recipe.
 
 use std::sync::{Arc, Mutex};
 
 use mod_api::{
-    ClientHost, ClientTickPostEvent, CraftingRecipeChoiceEvent, DrawContext, Flow, Hooks, IPayloadContext, IPayloadHandler, ItemResource,
-    ItemStack, LoopContext, MenuRef, MenuSlotKind, PayloadBytes, PayloadHandleError, PayloadId, Registrar,
+    ClientHost, CraftingRecipeChoiceEvent, DrawContext, Flow, Hooks, IPayloadContext, IPayloadHandler, ItemResource,
+    ItemStack, LoopContext, MenuRef, MenuSlotKind, PayloadBytes, PayloadHandleError, PayloadId, PayloadSendError, Registrar,
     RegistrationContext, ScreenMouseButtonPressedPreEvent, ScreenRenderPostEvent, ScreenView, ServerHost,
     ServerTickEvent, Text, TooltipElement,
 };
@@ -31,17 +32,25 @@ fn open() -> std::sync::MutexGuard<'static, Option<MenuRef>> {
     OPEN.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// Client: the pick to send to the server.
-static OUTGOING: Mutex<Option<Pick>> = Mutex::new(None);
+/// Client: the server this game is connected to answered that it has no Polymorph (an optional channel it
+/// lacks). Its matcher makes the first match whatever is picked here, so the selector stays hidden there.
+static NO_POLYMORPH: Mutex<Option<ServerKey>> = Mutex::new(None);
 
-fn outgoing() -> std::sync::MutexGuard<'static, Option<Pick>> {
-    OUTGOING.lock().unwrap_or_else(|e| e.into_inner())
+type ServerKey = (Option<String>, Option<String>, Option<String>);
+
+fn server_key(host: &dyn ClientHost) -> Option<ServerKey> {
+    host.client_session().client_server().map(|s| (s.name, s.address, s.save_folder))
 }
 
-/// Server: the players whose picks arrived since the last tick, whose crafting results are made again.
-static STALE: Mutex<Vec<u128>> = Mutex::new(Vec::new());
+fn no_polymorph() -> std::sync::MutexGuard<'static, Option<ServerKey>> {
+    NO_POLYMORPH.lock().unwrap_or_else(|e| e.into_inner())
+}
 
-fn stale() -> std::sync::MutexGuard<'static, Vec<u128>> {
+/// Server: a pick arrived since the last tick. The choice is kept per set of recipes for everyone on this
+/// server (the hook names no player), so every player's open grids are made again, not only the picker's.
+static STALE: Mutex<bool> = Mutex::new(false);
+
+fn stale() -> std::sync::MutexGuard<'static, bool> {
     STALE.lock().unwrap_or_else(|e| e.into_inner())
 }
 
@@ -52,12 +61,11 @@ struct PickHandler;
 impl IPayloadHandler for PickHandler {
     fn handle(&self, payload: PayloadBytes, context: &mut dyn IPayloadContext) -> Result<(), PayloadHandleError> {
         let Some(pick) = Pick::decode(&payload.0) else { return Ok(()) };
-        let Ok(player) = context.player() else { return Ok(()) };
+        if context.player().is_err() {
+            return Ok(());
+        }
         if engine::with(|c| c.pick(&pick.set, &pick.id)) {
-            let mut s = stale();
-            if !s.contains(&player.uuid()) {
-                s.push(player.uuid());
-            }
+            *stale() = true;
         }
         Ok(())
     }
@@ -82,6 +90,10 @@ impl Shown {
 
 fn shown(host: &dyn ClientHost, screen: &ScreenView<'_>) -> Option<Shown> {
     if screen.id != "inventory" {
+        return None;
+    }
+    let key = server_key(host);
+    if no_polymorph().as_ref().is_some_and(|k| Some(k) == key.as_ref()) {
         return None;
     }
     let menu = host.local_player()?.container_menu(host)?;
@@ -140,16 +152,11 @@ impl Hooks for Polymorph {
         event.choice = engine::choose(width, event.grid, event.recipes, event.results) as u32;
     }
 
-    fn client_tick_post(&self, host: &mut dyn ClientHost, _event: &mut ClientTickPostEvent) {
-        let Some(pick) = outgoing().take() else { return };
-        // A server without Polymorph answers UnsupportedPeer: the result there stays the first match.
-        if let Err(e) = host.send_payload_to_server(&PayloadId(engine::PICK.into()), PayloadBytes(pick.encode())) {
-            eprintln!("[polymorph] pick not sent: {e:?}");
-        }
-    }
-
     fn server_tick(&self, host: &mut dyn ServerHost, _event: &mut ServerTickEvent<'_>) {
-        let players = std::mem::take(&mut *stale());
+        if !std::mem::take(&mut *stale()) {
+            return;
+        }
+        let players: Vec<u128> = host.players().server_players().iter().map(|p| p.uuid()).collect();
         for uuid in players {
             if let Some(player) = host.player(uuid) {
                 player.crafting_changed(host);
@@ -221,9 +228,15 @@ impl Hooks for Polymorph {
             if let Some(i) = s.outputs_at().iter().position(|r| layout::inside(*r, at)) {
                 let id = s.ids[i].clone();
                 let set = s.ids.clone();
-                engine::with(|c| c.select(s.size, &s.grid, &id, engine::same));
-                // Sent on the next client tick, the first hook here with a host that can send.
-                *outgoing() = Some(Pick { id, set });
+                // Kept here (the client's prediction) only once the server has taken it, so the two agree.
+                let pick = Pick { id: id.clone(), set };
+                match host.queue_payload_to_server(&PayloadId(engine::PICK.into()), PayloadBytes(pick.encode())) {
+                    Ok(_) => {
+                        engine::with(|c| c.select(s.size, &s.grid, &id, engine::same));
+                    }
+                    Err(PayloadSendError::UnsupportedPeer(_)) => *no_polymorph() = server_key(host),
+                    Err(e) => eprintln!("[polymorph] pick not sent: {e:?}"),
+                }
             }
         }
         Flow::Cancel
